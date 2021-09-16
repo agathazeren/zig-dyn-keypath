@@ -74,6 +74,23 @@ pub const RecursiveField = struct {
         }
         return &new_fields;
     }
+
+    pub fn lessThan(_: void, comptime lhs: RecursiveField, comptime rhs: RecursiveField) bool {
+        var l_str = @typeName(lhs.field_type);
+        var r_str = @typeName(rhs.field_type);
+
+        // Start with lenth comparison
+        if (l_str.len != r_str.len) {
+            return l_str.len < r_str.len;
+        }
+
+        // fall back to lexical order by bytes.
+        var k: usize = 0;
+        while (k < l_str.len and l_str[k] == r_str[k]) : (k += 1) {}
+        if (k == l_str.len) return false; // equal case
+
+        return l_str[k] < r_str[k];
+    }
 };
 
 fn push(comptime T: type, comptime i: *comptime_int, array: []T, new: []const T) void {
