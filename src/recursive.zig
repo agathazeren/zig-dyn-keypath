@@ -7,14 +7,14 @@ const debug = std.debug;
 
 const TypeInfo = builtin.TypeInfo;
 
-const RecursiveField = struct {
+pub const RecursiveField = struct {
     path: []const []const u8,
     field_type: type,
     default_value: anytype,
     is_comptime: bool,
     alignment: comptime_int,
 
-    fn of(comptime T: type) []RecursiveField {
+    pub fn of(comptime T: type) []RecursiveField {
         @setEvalBranchQuota(100000);
 
         var fields: [count(T)]RecursiveField = undefined;
@@ -93,6 +93,8 @@ test "recursive field on single" {
         try testing.expectEqual(expected_field.path.len, actual_field.path.len);
         inline for (expected_field.path) |expected_id, j| {
             try testing.expectEqual(expected_field.path.len, actual_field.path.len);
+            _ = expected_id;
+            _ = j;
         }
     }
 }
@@ -122,6 +124,8 @@ test "recursive field on struct" {
         try testing.expectEqual(expected_field.path.len, actual_field.path.len);
         inline for (expected_field.path) |expected_id, j| {
             try testing.expectEqual(expected_field.path.len, actual_field.path.len);
+            _ = expected_id;
+            _ = j;
         }
     }
 }
@@ -167,6 +171,8 @@ test "recursive field on nested" {
         try testing.expectEqual(expected_field.path.len, actual_field.path.len);
         inline for (expected_field.path) |expected_id, j| {
             try testing.expectEqual(expected_field.path.len, actual_field.path.len);
+            _ = expected_id;
+            _ = j;
         }
     }
 }
