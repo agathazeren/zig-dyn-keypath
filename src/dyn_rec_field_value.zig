@@ -4,6 +4,8 @@ const builtin = std.builtin;
 const math = std.math;
 const mem = std.mem;
 const meta = std.meta;
+const testing = std.testing;
+const debug = std.debug;
 
 const TypeInfo = builtin.TypeInfo;
 
@@ -102,18 +104,38 @@ pub fn DynRecFieldValue(comptime T: type) type {
             unreachable;
         }
 
-        pub fn fromRaw(dyn_type: TagType, data: [*]const u8, bit_offset: u3) Self {
-            var out: Self = .{ .tag = dyn_type, .value = undefined };
-
-            copyAndBitshiftDown(data, mem.asBytes(&out.value), bit_offset);
-
-            return out;
-        }
-
         pub fn fromZst(dyn_type: TagType) Self {
             // Since the type_table is not in this struct, this cannot be safety
             // checked.
             return .{ .tag = dyn_type, .value = undefined };
+        }
+
+        pub fn fromRaw(dyn_type: TagType, data: [*]const u8, bit_offset: u3) Self {
+            var out: Self = .{ .tag = dyn_type, .value = undefined };
+
+            copyAndBitshiftDown(data, mem.asBytes(&out.value)[0..byteSize(dyn_type)], bit_offset);
+
+            return out;
+        }
+
+        pub fn writeRaw(self: Self, out: [*]u8, bit_offset: u3) void {
+            copyAndBitshiftUp(
+                mem.asBytes(&self.value)[0 .. byteSize(self.tag) + 1],
+                out,
+                bit_offset,
+            );
+        }
+
+        const size_table = tbl: {
+            var table: [math.maxInt(meta.TagType(DynType)) + 1]usize = undefined;
+            for (types) |ty| {
+                table[@enumToInt(dynType(ty).?)] = @sizeOf(ty);
+            }
+            break :tbl table;
+        };
+
+        pub fn byteSize(dyn_type: DynType) usize {
+            return size_table[@enumToInt(dyn_type)];
         }
     };
 }
@@ -123,4 +145,31 @@ fn copyAndBitshiftDown(source: [*]const u8, dest: []u8, bit_offset: u3) void {
         var int = mem.readIntLittle(u16, @ptrCast(*const [2]u8, &source[i]));
         out.* = @truncate(u8, int >> bit_offset);
     }
+}
+
+fn copyAndBitshiftUp(source: []const u8, dest: [*]u8, bit_offset: u3) void {
+    if (source.len == 0) unreachable;
+    var last_byte = dest[0];
+    for (source) |byte, i| {
+        var two: u16 = @as(u16, last_byte) | (@as(u16, byte) << 8);
+        two <<= bit_offset;
+        dest[i] = @intCast(u8, two >> 8);
+        last_byte = byte;
+    }
+}
+
+test "bitshift copies roundtrip" {
+    var r = std.rand.DefaultPrng.init(0x64a963238f776912);
+    var data: [16]u8 = undefined;
+    r.random.bytes(&data);
+
+    var shifted: [17]u8 = undefined;
+
+    copyAndBitshiftUp(mem.asBytes(&data), &shifted, 3);
+
+    var roundtrip: [16]u8 = undefined;
+
+    copyAndBitshiftDown(&shifted, mem.asBytes(&roundtrip), 3);
+
+    try testing.expectEqual(data, roundtrip);
 }

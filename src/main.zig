@@ -105,7 +105,14 @@ pub fn RecursiveKeypath(comptime T: type) type {
 
         //pub fn getDuck(self: Self, Duck: type, obj: Duck) DynRecFieldValue(Duck) {}
 
-        //pub fn set(self: Self, obj: *T, value: DynRecFieldValue(T)) void {}
+        pub fn set(self: Self, obj: *T, value: DynRecFieldValue(T)) void {
+            debug.assert(self.dynType() == value.tag);
+            if (self.isZst()) return;
+            value.writeRaw(
+                @ptrCast([*]u8, @ptrCast([*]u8, obj) + self.byteOffset().?),
+                @intCast(u3, self.bitOffset().? - self.byteOffset().? * 8),
+            );
+        }
 
         //pub fn setDuck(self: Self, Duck: type, obj: *Duck, value: DynRecFieldValue(T)) void {}
 
@@ -401,4 +408,7 @@ test "keypaths" {
     var x_kp = kp.key("x").?;
 
     try testing.expect(x_kp.get(&t).eq(DynRecFieldValue(T).of(usize, 1)));
+
+    x_kp.set(&t, DynRecFieldValue(T).of(usize, 32));
+    try testing.expect(t.x == 32);
 }
