@@ -20,28 +20,28 @@ pub const DynRecFieldValue = @import("dyn_rec_field_value.zig").DynRecFieldValue
 //pub fn DynFieldType(T: type) type {}
 
 pub fn RecursiveKeypath(comptime T: type) type {
-    const fields = RecursiveField.of(T);
+    const _fields = RecursiveField.of(T);
 
     var builder = KeypathBuilder(@bitSizeOf(T)){};
 
-    for (fields) |field| {
+    for (_fields) |field| {
         builder.add(recursiveBitOffset(T, field.path), @bitSizeOf(field.field_type) == 0);
     }
     builder.done = true;
 
     const tagDefn = builder.tagDefn();
 
-    var _enum_fields: [fields.len]TypeInfo.EnumField = undefined;
+    var _enum_fields: [_fields.len]TypeInfo.EnumField = undefined;
 
-    for (fields) |field, i| {
+    for (_fields) |field, i| {
         _enum_fields[i] = TypeInfo.EnumField{
             .name = mangle(field.path),
             .value = builder.tag(recursiveBitOffset(T, field.path), @bitSizeOf(field.field_type) == 0),
         };
     }
 
-    comptime var _names: [fields.len - 1][]const u8 = undefined;
-    for (fields) |field, i| {
+    comptime var _names: [_fields.len - 1][]const u8 = undefined;
+    for (_fields) |field, i| {
         if (field.path.len == 0) continue;
         _names[i - 1] = field.path[field.path.len - 1];
     }
@@ -68,9 +68,24 @@ pub fn RecursiveKeypath(comptime T: type) type {
         .is_exhaustive = true,
     } });
 
-    const enum_fields = _enum_fields;
     const name_count = _name_count;
     const names = _names_dedup;
+
+    const FieldEntry = struct {
+        path: []const []const u8,
+        field_type: type,
+        value: comptime_int,
+    };
+
+    comptime var _field_data: [_fields.len]FieldEntry = undefined;
+    for (_fields) |field, i| {
+        _field_data[i] = .{
+            .path = field.path,
+            .field_type = field.field_type,
+            .value = _enum_fields[i].value,
+        };
+    }
+    const field_data = _field_data;
 
     return struct {
         _inner: Inner,
@@ -83,13 +98,19 @@ pub fn RecursiveKeypath(comptime T: type) type {
 
         pub fn key(self: Self, name: []const u8) ?Self {
             if (name_id_map.get(name)) |name_id| {
-                return subkey_table[@enumToInt(self._inner)][name_id];
+                return subkey_table[self.toInt()][name_id];
             } else {
                 return null;
             }
         }
 
-        //pub fn up(self: Self) ?Self {}
+        pub fn up(self: Self) ?Self {
+            if (self.eq(root())) {
+                return null;
+            } else {
+                return up_table[self.toInt()];
+            }
+        }
 
         pub fn get(self: Self, obj: *const T) DynRecFieldValue(T) {
             if (self.isZst()) {
@@ -116,6 +137,30 @@ pub fn RecursiveKeypath(comptime T: type) type {
 
         //pub fn setDuck(self: Self, Duck: type, obj: *Duck, value: DynRecFieldValue(T)) void {}
 
+        pub fn fromPath(path: []const []const u8) ?Self {
+            var kp: ?Self = root();
+            for (path) |comp| {
+                if (kp != null) {
+                    kp = kp.?.key(comp);
+                }
+            }
+            return kp;
+        }
+
+        pub fn fromPathComptime(comptime path: []const []const u8) ?Self {
+            for (field_data) |field| {
+                if (eqlStringSlices(field.path, path)) {
+                    return Self{ ._inner = @intToEnum(Inner, field.value) };
+                }
+            }
+
+            return null;
+        }
+
+        pub fn eq(self: Self, other: Self) bool {
+            return self._inner == other._inner;
+        }
+
         const Int = meta.TagType(Inner);
 
         fn toInt(self: Self) Int {
@@ -128,8 +173,8 @@ pub fn RecursiveKeypath(comptime T: type) type {
 
         const type_table = tbl: {
             var table: [table_size]DynType = undefined;
-            for (fields) |field, i| {
-                table[enum_fields[i].value] = DynRecFieldValue(T).dynType(field.field_type).?;
+            for (field_data) |field| {
+                table[field.value] = DynRecFieldValue(T).dynType(field.field_type).?;
             }
             break :tbl table;
         };
@@ -142,10 +187,19 @@ pub fn RecursiveKeypath(comptime T: type) type {
             break :kvs _kvs;
         });
 
+        const up_table: [table_size]Self = tbl: {
+            var table: [table_size]Self = undefined;
+            for (field_data) |field| {
+                if (field.path.len == 0) continue;
+                table[field.value] = Self.fromPath(field.path[0 .. field.path.len - 1]).?;
+            }
+            break :tbl table;
+        };
+
         const subkey_table: [table_size][math.maxInt(NameId) + 1]?Self = tbl: {
             var table: [table_size][math.maxInt(NameId) + 1]?Self = undefined;
-            for (fields) |field, i| {
-                for (table[i]) |*k| {
+            for (field_data) |field| {
+                for (table[field.value]) |*k| {
                     k.* = null;
                 }
                 switch (meta.activeTag(@typeInfo(field.field_type))) {
@@ -157,16 +211,8 @@ pub fn RecursiveKeypath(comptime T: type) type {
                 for (meta.fields(field.field_type)) |subfield| {
                     var name_id = name_id_map.get(subfield.name).?;
                     var subfield_path = field.path ++ [1][]const u8{subfield.name};
-                    for (fields) |upcoming_field, upcoming_i| {
-                        if (eqlStringSlices(upcoming_field.path, subfield_path)) {
-                            table[i][@as(usize, name_id)] = .{
-                                ._inner = @intToEnum(Inner, enum_fields[upcoming_i].value),
-                            };
-                            break;
-                        }
-                    }
+                    table[field.value][@as(usize, name_id)] = Self.fromPathComptime(subfield_path).?;
                 }
-                //                @compileLog("i: ", i, "field: ", field.path, "subs", table[i]);
             }
             break :tbl table;
         };
@@ -406,9 +452,16 @@ test "keypaths" {
     var kp = RecursiveKeypath(T).root();
 
     var x_kp = kp.key("x").?;
+    var z_b_j_kp = kp.key("z").?.key("b").?.key("j").?;
+
+    var path_kp = RecursiveKeypath(T).fromPath(&.{ "z", "b", "j" });
+    try testing.expect(path_kp != null);
+    try testing.expect(z_b_j_kp.eq(path_kp.?));
 
     try testing.expect(x_kp.get(&t).eq(DynRecFieldValue(T).of(usize, 1)));
 
     x_kp.set(&t, DynRecFieldValue(T).of(usize, 32));
     try testing.expect(t.x == 32);
+
+    try testing.expect(x_kp.up().?.eq(kp));
 }
