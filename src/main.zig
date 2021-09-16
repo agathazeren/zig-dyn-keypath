@@ -24,17 +24,19 @@ pub fn RecursiveKeypath(comptime T: type) type {
 
     var builder = KeypathBuilder(@bitSizeOf(T)){};
 
-    for (fields) |field, i| {
-        builder.add(recursiveBitOffset(T, field.path), i == 0 or @bitSizeOf(field.field_type) == 0);
+    for (fields) |field| {
+        builder.add(recursiveBitOffset(T, field.path), @bitSizeOf(field.field_type) == 0);
     }
     builder.done = true;
+
+    const tagDefn = builder.tagDefn();
 
     var _enum_fields: [fields.len]TypeInfo.EnumField = undefined;
 
     for (fields) |field, i| {
         _enum_fields[i] = TypeInfo.EnumField{
             .name = mangle(field.path),
-            .value = builder.tag(recursiveBitOffset(T, field.path), i == 0 or @bitSizeOf(field.field_type) == 0),
+            .value = builder.tag(recursiveBitOffset(T, field.path), @bitSizeOf(field.field_type) == 0),
         };
     }
 
@@ -60,7 +62,7 @@ pub fn RecursiveKeypath(comptime T: type) type {
 
     const Inner = @Type(.{ .Enum = TypeInfo.Enum{
         .layout = .Auto,
-        .tag_type = builder.tagDefn().TagType(),
+        .tag_type = tagDefn.TagType(),
         .fields = &_enum_fields,
         .decls = &[0]TypeInfo.Declaration{},
         .is_exhaustive = true,
@@ -89,11 +91,16 @@ pub fn RecursiveKeypath(comptime T: type) type {
 
         //pub fn up(self: Self) ?Self {}
 
-        pub fn get(self: Self, obj: *T) DynRecFieldValue(T) {
-            return DynRecFieldValue(T).from(
-                self,
-                self.extract(@ptrCast([*]u8, obj)),
-            );
+        pub fn get(self: Self, obj: *const T) DynRecFieldValue(T) {
+            if (self.isZst()) {
+                return DynRecFieldValue(T).fromZst(self.dynType());
+            } else {
+                return DynRecFieldValue(T).fromRaw(
+                    self.dynType(),
+                    @ptrCast([*]const u8, &@ptrCast([*]const u8, obj)[self.byteOffset().?]),
+                    @intCast(u3, self.bitOffset().? - self.byteOffset().? * 8),
+                );
+            }
         }
 
         //pub fn getDuck(self: Self, Duck: type, obj: Duck) DynRecFieldValue(Duck) {}
@@ -102,14 +109,20 @@ pub fn RecursiveKeypath(comptime T: type) type {
 
         //pub fn setDuck(self: Self, Duck: type, obj: *Duck, value: DynRecFieldValue(T)) void {}
 
-        const DynType = meta.TagType(DynRecFieldValue);
+        const Int = meta.TagType(Inner);
 
-        const table_size = math.maxInt(meta.TagType(Inner)) + 1;
+        fn toInt(self: Self) Int {
+            return @enumToInt(self._inner);
+        }
+
+        const DynType = DynRecFieldValue(T).DynType;
+
+        const table_size = math.maxInt(Int) + 1;
 
         const type_table = tbl: {
             var table: [table_size]DynType = undefined;
             for (fields) |field, i| {
-                table[enum_fields[i].value] = DynRecFieldValue(T).dynType(field.field_type);
+                table[enum_fields[i].value] = DynRecFieldValue(T).dynType(field.field_type).?;
             }
             break :tbl table;
         };
@@ -125,12 +138,13 @@ pub fn RecursiveKeypath(comptime T: type) type {
         const subkey_table: [table_size][math.maxInt(NameId) + 1]?Self = tbl: {
             var table: [table_size][math.maxInt(NameId) + 1]?Self = undefined;
             for (fields) |field, i| {
-                var subtable = &table[enum_fields[i].value];
-                for (subtable) |*k| {
+                for (table[i]) |*k| {
                     k.* = null;
                 }
                 switch (meta.activeTag(@typeInfo(field.field_type))) {
-                    .Struct, .Union => {},
+                    // Note that non-extern unions cannot be included, becase we won't set the tag right.
+                    .Struct => {},
+                    .Union => if (@typeInfo(field.field_type).Union.layout != .Extern) continue,
                     else => continue,
                 }
                 for (meta.fields(field.field_type)) |subfield| {
@@ -138,19 +152,37 @@ pub fn RecursiveKeypath(comptime T: type) type {
                     var subfield_path = field.path ++ [1][]const u8{subfield.name};
                     for (fields) |upcoming_field, upcoming_i| {
                         if (eqlStringSlices(upcoming_field.path, subfield_path)) {
-                            subtable[@as(usize, name_id)] = .{
+                            table[i][@as(usize, name_id)] = .{
                                 ._inner = @intToEnum(Inner, enum_fields[upcoming_i].value),
                             };
                             break;
                         }
                     }
                 }
+                //                @compileLog("i: ", i, "field: ", field.path, "subs", table[i]);
             }
             break :tbl table;
         };
 
         fn dynType(self: Self) DynType {
             return type_table[@enumToInt(self._inner)];
+        }
+
+        fn isZst(self: Self) bool {
+            return tagDefn.isZst(self.toInt());
+        }
+
+        fn bitOffset(self: Self) ?usize {
+            return tagDefn.bitOffset(self.toInt());
+        }
+
+        fn byteOffset(self: Self) ?usize {
+            if (self.bitOffset()) |bit_offset| {
+                // No div by zero or overflow possible.
+                return math.divFloor(usize, bit_offset, 8) catch unreachable;
+            } else {
+                return null;
+            }
         }
     };
 }
@@ -191,6 +223,7 @@ pub fn DynRecFieldValue(comptime T: type) type {
 
     const tag_fields = &_tag_fields;
     const union_fields = &_union_fields;
+    const __types = _types;
 
     const TagType = @Type(.{ .Enum = .{
         .layout = .Auto,
@@ -201,22 +234,27 @@ pub fn DynRecFieldValue(comptime T: type) type {
     } });
 
     const UnionType = @Type(.{ .Union = .{
-        .layout = .Auto,
-        .tag_type = TagType,
+        .layout = .Extern,
+        .tag_type = null,
         .fields = union_fields,
         .decls = &[0]TypeInfo.Declaration{},
     } });
 
     return struct {
-        _inner: UnionType,
+        tag: TagType,
+        value: UnionType,
 
         const Self = @This();
 
-        const types = _types;
+        const types = __types;
+
+        const DynType = TagType;
 
         fn of(comptime Type: type, val: Type) Self {
             comptime var tag = dynType(Type) orelse @compileError("Type is not a tag of union");
-            return .{ ._inner = @unionInit(UnionType, @tagName(tag), val) };
+            var value: UnionType = undefined;
+            @ptrCast(*Type, &value).* = val;
+            return .{ .tag = tag, .value = value };
         }
 
         fn dynType(comptime Ty: type) ?TagType {
@@ -227,15 +265,12 @@ pub fn DynRecFieldValue(comptime T: type) type {
         }
 
         fn eq(self: Self, other: Self) bool {
-            const self_tag = @as(TagType, self._inner);
-            const other_tag = @as(TagType, other._inner);
-
-            if (self_tag != other_tag) return false;
+            if (self.tag != other.tag) return false;
 
             inline for (union_fields) |field| {
-                if (mem.eql(u8, @tagName(self._inner), field.name)) {
-                    var self_val = @field(self._inner, field.name);
-                    var other_val = @field(other._inner, field.name);
+                if (mem.eql(u8, @tagName(self.tag), field.name)) {
+                    var self_val = @field(self.value, field.name);
+                    var other_val = @field(other.value, field.name);
                     return meta.eql(self_val, other_val);
                 }
             }
@@ -243,12 +278,27 @@ pub fn DynRecFieldValue(comptime T: type) type {
             unreachable;
         }
 
-        fn from_raw(dyn_type: TagType, data: [*]u8, bit_offset: u3) Self {
-            const data_bit_size = dyn_type.bit_size() + bit_offset;
+        fn fromRaw(dyn_type: TagType, data: [*]const u8, bit_offset: u3) Self {
+            var out: Self = .{ .tag = dyn_type, .value = undefined };
 
-            var out: UnionType = undefined;
+            copyAndBitshiftDown(data, mem.asBytes(&out.value), bit_offset);
+
+            return out;
+        }
+
+        fn fromZst(dyn_type: TagType) Self {
+            // Since the type_table is not in this struct, this cannot be safety
+            // checked.
+            return .{ .tag = dyn_type, .value = undefined };
         }
     };
+}
+
+fn copyAndBitshiftDown(source: [*]const u8, dest: []u8, bit_offset: u3) void {
+    for (dest) |*out, i| {
+        var int = mem.readIntLittle(u16, @ptrCast(*const [2]u8, &source[i]));
+        out.* = @truncate(u8, int >> bit_offset);
+    }
 }
 
 fn lexicalSort(_: void, lhs: []const u8, rhs: []const u8) bool {
@@ -425,6 +475,7 @@ fn KeypathBuilder(comptime bit_size: comptime_int) type {
         }
     };
 }
+
 const TagDefn = struct {
     min_bitalign: comptime_int,
     max_bit_offset: comptime_int,
@@ -438,18 +489,32 @@ const TagDefn = struct {
     pub fn maxSizedTag(comptime self: *const TagDefn) comptime_int {
         comptime var max_int = 0;
         max_int = 1 << self.offsetSize();
-        max_int <<= math.log2(self.max_disambig);
+        // The + 1 ensures that a max_disambig of 0 will give a shift of zero,
+        // and 1 or more will give a shift of 1 or more.
+        max_int <<= math.log2_int_ceil(usize, @as(usize, self.max_disambig + 1));
         max_int -= 1;
-        if (max_int <= 0) max_int = 1;
-        // so that the root is different than the first zst field in a struct of
-        // all zsts
+        if (max_int <= 0) max_int = 1; // so that the root is different than the
+        // first zst field in a struct of all
+        // zsts
         return max_int;
     }
 
     pub fn offsetSize(comptime self: *const TagDefn) comptime_int {
         if (self.max_bit_offset == 0) return 0;
-        const size = math.log2(self.max_bit_offset) - self.min_bitalign;
+        const size = math.log2_int_ceil(usize, @as(usize, self.max_bit_offset)) - self.min_bitalign;
         return size;
+    }
+
+    pub fn isZst(comptime self: *const TagDefn, tag: self.TagType()) bool {
+        return tag > self.maxSizedTag();
+    }
+
+    pub fn bitOffset(comptime self: *const TagDefn, tag: self.TagType()) ?usize {
+        if (self.isZst(tag)) return null;
+        var dat = @as(usize, tag);
+        dat &= (1 << self.offsetSize()) - 1;
+        dat <<= self.min_bitalign;
+        return dat;
     }
 };
 
