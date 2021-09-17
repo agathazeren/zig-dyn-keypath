@@ -70,6 +70,10 @@ pub fn RecursiveKeypath(comptime T: type) type {
 
         pub fn key(self: Self, name: []const u8) ?Self {
             if (name_id_map.get(name)) |name_id| {
+                debug.print("found key {s}\n", .{name});
+                if (mem.eql(u8, "feathers", name)) {
+                    debug.print("table {any}\n", .{subkey_table});
+                }
                 return subkey_table[self.toInt()][name_id];
             } else {
                 return null;
@@ -96,8 +100,6 @@ pub fn RecursiveKeypath(comptime T: type) type {
             }
         }
 
-        //pub fn getDuck(self: Self, Duck: type, obj: Duck) DynRecFieldValue(Duck) {}
-
         pub fn set(self: Self, obj: *T, value: DynRecFieldValue(T)) void {
             debug.assert(self.dynType() == value.tag);
             if (self.isZst()) return;
@@ -107,7 +109,22 @@ pub fn RecursiveKeypath(comptime T: type) type {
             );
         }
 
-        //pub fn setDuck(self: Self, Duck: type, obj: *Duck, value: DynRecFieldValue(T)) void {}
+        pub fn duck(self: Self, comptime Duck: type) ?RecursiveKeypath(Duck) {
+            var path: [max_depth][]const u8 = undefined;
+            var idx = max_depth - 1;
+            var kp: ?Self = self;
+            while (kp != null) {
+                if (self.fieldName()) |field_name| {
+                    path[idx] = field_name;
+                } else {
+                    break; // root
+                }
+                idx -= 1;
+                kp = kp.?.up();
+            }
+
+            return RecursiveKeypath(Duck).fromPath(path[idx..max_depth]);
+        }
 
         pub fn fromPath(path: []const []const u8) ?Self {
             var kp: ?Self = root();
@@ -127,6 +144,14 @@ pub fn RecursiveKeypath(comptime T: type) type {
             }
 
             return null;
+        }
+
+        pub fn fieldName(self: Self) ?[]const u8 {
+            if (self.eq(root())) {
+                return null;
+            } else {
+                return name_table[self.toInt()];
+            }
         }
 
         pub fn eq(self: Self, other: Self) bool {
@@ -159,11 +184,28 @@ pub fn RecursiveKeypath(comptime T: type) type {
             break :kvs _kvs;
         });
 
+        const max_depth: usize = max: {
+            var max: usize = 0;
+            for (field_data) |field| {
+                if (field.path.len > max) max = field.path.len;
+            }
+            break :max max;
+        };
+
+        const name_table: [table_size][]const u8 = tbl: {
+            var table: [table_size][]const u8 = undefined;
+            for (field_data) |field| {
+                if (field.path.len == 0) continue; // leave root undefined
+                table[field.value] = field.path[field.path.len - 1];
+            }
+            break :tbl table;
+        };
+
         const up_table: [table_size]Self = tbl: {
             var table: [table_size]Self = undefined;
             for (field_data) |field| {
                 if (field.path.len == 0) continue;
-                table[field.value] = Self.fromPath(field.path[0 .. field.path.len - 1]).?;
+                table[field.value] = Self.fromPathComptime(field.path[0 .. field.path.len - 1]).?;
             }
             break :tbl table;
         };
@@ -180,12 +222,15 @@ pub fn RecursiveKeypath(comptime T: type) type {
                     .Union => if (@typeInfo(field.field_type).Union.layout != .Extern) continue,
                     else => continue,
                 }
+                //@compileLog("filling", field.path);
                 for (meta.fields(field.field_type)) |subfield| {
                     var name_id = name_id_map.get(subfield.name).?;
                     var subfield_path = field.path ++ [1][]const u8{subfield.name};
                     table[field.value][@as(usize, name_id)] = Self.fromPathComptime(subfield_path).?;
+                    //@compileLog("     ", table[field.value][@as(usize, name_id)].?._inner);
                 }
             }
+            //@compileLog(table);
             break :tbl table;
         };
 
@@ -420,4 +465,36 @@ test "keypaths" {
     try testing.expect(t.x == 32);
 
     try testing.expect(x_kp.up().?.eq(kp));
+}
+
+test "duck" {
+    const Looks = struct {
+        feathers: usize,
+        bill: usize,
+    };
+
+    const A = struct {
+        quack: usize,
+        looks: Looks,
+    };
+
+    const AA = struct {
+        quack: usize,
+        looks: Looks,
+    };
+
+    const B = struct {
+        looks: Looks,
+        flap: usize,
+    };
+
+    //debug.print("{any}\n", .{RecursiveKeypath(B).subkey_table});
+
+    var a_kp = RecursiveKeypath(A).root().key("looks").?.key("feathers").?;
+    _ = RecursiveKeypath(AA).root().key("looks").?.key("feathers").?;
+    var b_kp = RecursiveKeypath(B).root().key("looks").?.key("feathers").?;
+
+    var a_duck = b_kp.duck(A).?;
+
+    try testing.expect(a_kp.eq(a_duck));
 }
