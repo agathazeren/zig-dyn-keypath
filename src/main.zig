@@ -70,10 +70,6 @@ pub fn RecursiveKeypath(comptime T: type) type {
 
         pub fn key(self: Self, name: []const u8) ?Self {
             if (name_id_map.get(name)) |name_id| {
-                debug.print("found key {s}\n", .{name});
-                if (mem.eql(u8, "feathers", name)) {
-                    debug.print("table {any}\n", .{subkey_table});
-                }
                 return subkey_table[self.toInt()][name_id];
             } else {
                 return null;
@@ -110,11 +106,11 @@ pub fn RecursiveKeypath(comptime T: type) type {
         }
 
         pub fn duck(self: Self, comptime Duck: type) ?RecursiveKeypath(Duck) {
-            var path: [max_depth][]const u8 = undefined;
-            var idx = max_depth - 1;
+            var path: [max_depth + 1][]const u8 = undefined;
+            var idx = max_depth;
             var kp: ?Self = self;
             while (kp != null) {
-                if (self.fieldName()) |field_name| {
+                if (kp.?.fieldName()) |field_name| {
                     path[idx] = field_name;
                 } else {
                     break; // root
@@ -123,7 +119,7 @@ pub fn RecursiveKeypath(comptime T: type) type {
                 kp = kp.?.up();
             }
 
-            return RecursiveKeypath(Duck).fromPath(path[idx..max_depth]);
+            return RecursiveKeypath(Duck).fromPath(path[idx + 1 .. max_depth + 1]);
         }
 
         pub fn fromPath(path: []const []const u8) ?Self {
@@ -478,20 +474,12 @@ test "duck" {
         looks: Looks,
     };
 
-    const AA = struct {
-        quack: usize,
-        looks: Looks,
-    };
-
     const B = struct {
         looks: Looks,
         flap: usize,
     };
 
-    //debug.print("{any}\n", .{RecursiveKeypath(B).subkey_table});
-
     var a_kp = RecursiveKeypath(A).root().key("looks").?.key("feathers").?;
-    _ = RecursiveKeypath(AA).root().key("looks").?.key("feathers").?;
     var b_kp = RecursiveKeypath(B).root().key("looks").?.key("feathers").?;
 
     var a_duck = b_kp.duck(A).?;
