@@ -48,7 +48,7 @@ pub const RecursiveField = struct {
         return &fields;
     }
 
-    fn count(comptime T: type) comptime_int {
+    pub fn count(comptime T: type) comptime_int {
         switch (@typeInfo(T)) {
             .Struct, .Union => {
                 var n: comptime_int = 1; // the 1 is the field continaing the struct

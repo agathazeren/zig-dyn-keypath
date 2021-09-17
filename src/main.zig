@@ -20,30 +20,20 @@ pub const DynRecFieldValue = @import("dyn_rec_field_value.zig").DynRecFieldValue
 //pub fn DynFieldType(T: type) type {}
 
 pub fn RecursiveKeypath(comptime T: type) type {
-    const _fields = RecursiveField.of(T);
+    const keypath_data = buildKeypathData(T);
+    const field_data = keypath_data.field_data;
 
-    var builder = KeypathBuilder(@bitSizeOf(T)){};
-
-    for (_fields) |field| {
-        builder.add(recursiveBitOffset(T, field.path), @bitSizeOf(field.field_type) == 0);
-    }
-    builder.done = true;
-
-    const tagDefn = builder.tagDefn();
-
-    var _enum_fields: [_fields.len]TypeInfo.EnumField = undefined;
-
-    for (_fields) |field, i| {
+    var _enum_fields: [field_data.len]TypeInfo.EnumField = undefined;
+    for (field_data) |field, i| {
         _enum_fields[i] = TypeInfo.EnumField{
             .name = mangle(field.path),
-            .value = builder.tag(recursiveBitOffset(T, field.path), @bitSizeOf(field.field_type) == 0),
+            .value = field.value,
         };
     }
 
-    comptime var _names: [_fields.len - 1][]const u8 = undefined;
-    for (_fields) |field, i| {
-        if (field.path.len == 0) continue;
-        _names[i - 1] = field.path[field.path.len - 1];
+    comptime var _names: [field_data.len - 1][]const u8 = undefined;
+    for (field_data[1..field_data.len]) |field, i| {
+        _names[i] = field.path[field.path.len - 1];
     }
     sort([]const u8, &_names, {}, lexicalSort);
     comptime var _name_count = 0;
@@ -59,33 +49,15 @@ pub fn RecursiveKeypath(comptime T: type) type {
             _names_j += 1;
         }
     }
+    const names = _names_dedup;
 
     const Inner = @Type(.{ .Enum = TypeInfo.Enum{
         .layout = .Auto,
-        .tag_type = tagDefn.TagType(),
+        .tag_type = keypath_data.stats.Tag(),
         .fields = &_enum_fields,
         .decls = &[0]TypeInfo.Declaration{},
         .is_exhaustive = true,
     } });
-
-    const name_count = _name_count;
-    const names = _names_dedup;
-
-    const FieldEntry = struct {
-        path: []const []const u8,
-        field_type: type,
-        value: comptime_int,
-    };
-
-    comptime var _field_data: [_fields.len]FieldEntry = undefined;
-    for (_fields) |field, i| {
-        _field_data[i] = .{
-            .path = field.path,
-            .field_type = field.field_type,
-            .value = _enum_fields[i].value,
-        };
-    }
-    const field_data = _field_data;
 
     return struct {
         _inner: Inner,
@@ -178,9 +150,9 @@ pub fn RecursiveKeypath(comptime T: type) type {
             }
             break :tbl table;
         };
-        const NameId = math.IntFittingRange(0, name_count);
+        const NameId = math.IntFittingRange(0, names.len);
         const name_id_map: type = ComptimeStringMap(NameId, kvs: {
-            comptime var _kvs: [name_count]struct { @"0": []const u8, @"1": NameId } = undefined;
+            comptime var _kvs: [names.len]struct { @"0": []const u8, @"1": NameId } = undefined;
             for (names) |name, i| {
                 _kvs[i] = .{ .@"0" = name, .@"1" = i };
             }
@@ -222,11 +194,11 @@ pub fn RecursiveKeypath(comptime T: type) type {
         }
 
         fn isZst(self: Self) bool {
-            return tagDefn.isZst(self.toInt());
+            return self.bitOffset() == null;
         }
 
         fn bitOffset(self: Self) ?usize {
-            return tagDefn.bitOffset(self.toInt());
+            return TagComponents.from(keypath_data.stats, self.toInt()).offset;
         }
 
         fn byteOffset(self: Self) ?usize {
@@ -238,6 +210,101 @@ pub fn RecursiveKeypath(comptime T: type) type {
             }
         }
     };
+}
+
+const FieldEntry = struct {
+    path: []const []const u8,
+    field_type: type,
+    value: comptime_int,
+};
+
+const TagComponents = struct {
+    offset: ?usize,
+    id: usize,
+
+    fn toTag(comptime self: TagComponents, comptime stats: TagStats) stats.Tag() {
+        if (self.offset) |offset| {
+            return @as(stats.Tag(), offset >> stats.aligned_bits | self.id << stats.offsetBits());
+        } else {
+            return @as(stats.Tag(), stats.max_sized_value + self.id);
+        }
+    }
+
+    fn from(comptime stats: TagStats, tag: stats.Tag()) TagComponents {
+        const offset_mask: usize = ((1 << stats.offsetBits()) - 1);
+        return .{
+            .offset = @as(usize, (tag & offset_mask)) << stats.aligned_bits,
+            .id = tag & ~offset_mask >> stats.aligned_bits,
+        };
+    }
+};
+
+const TagStats = struct {
+    aligned_bits: comptime_int,
+    max_offset: comptime_int,
+    max_sized_id: comptime_int,
+    num_zst: comptime_int,
+
+    fn offsetBits(comptime self: TagStats) comptime_int {
+        return math.log2_int_ceil(usize, self.max_offset + 1) - self.aligned_bits;
+    }
+
+    fn idBits(comptime self: TagStats) comptime_int {
+        return math.log2_int_ceil(usize, self.max_sized_id + self.num_zst + 1);
+    }
+
+    fn Tag(comptime self: TagStats) type {
+        return meta.Int(.unsigned, self.offsetBits() + self.idBits());
+    }
+};
+
+fn KeypathData(comptime T: type) type {
+    return struct {
+        field_data: [RecursiveField.count(T)]FieldEntry,
+        stats: TagStats,
+    };
+}
+
+fn buildKeypathData(comptime T: type) KeypathData(T) {
+    const fields = RecursiveField.of(T);
+
+    var field_data: [fields.len]FieldEntry = undefined;
+
+    var tag_components: [fields.len]TagComponents = undefined;
+
+    var next_sized_id: [@bitSizeOf(T)]comptime_int = [_]comptime_int{0} ** @bitSizeOf(T);
+
+    var stats = TagStats{
+        .aligned_bits = math.maxInt(usize),
+        .max_offset = 0,
+        .max_sized_id = 0,
+        .num_zst = 0,
+    };
+
+    for (fields) |field, i| {
+        if (@bitSizeOf(field.field_type) == 0) {
+            tag_components[i] = .{ .offset = null, .id = stats.num_zst };
+            stats.num_zst += 1;
+        } else {
+            const offset = recursiveBitOffset(T, field.path);
+            tag_components[i] = .{ .offset = offset, .id = next_sized_id[offset] };
+            if (next_sized_id[offset] > stats.max_sized_id) stats.max_sized_id = next_sized_id[offset];
+            next_sized_id[offset] += 1;
+            if (offset > stats.max_offset) stats.max_offset = offset;
+            const leading = leadingBits(0, offset) orelse math.maxInt(usize);
+            if (leading < stats.aligned_bits) stats.aligned_bits = leading;
+        }
+    }
+
+    for (fields) |field, i| {
+        field_data[i] = .{
+            .path = field.path,
+            .field_type = field.field_type,
+            .value = tag_components[i].toTag(stats),
+        };
+    }
+
+    return .{ .field_data = field_data, .stats = stats };
 }
 
 fn lexicalSort(_: void, lhs: []const u8, rhs: []const u8) bool {
@@ -287,117 +354,6 @@ fn mangle(comptime path: []const []const u8) []const u8 {
 
     return name;
 }
-
-fn KeypathBuilder(comptime bit_size: comptime_int) type {
-    return struct {
-        fields: [bit_size]comptime_int = [1]comptime_int{0} ** bit_size,
-        zst_count: comptime_int = 0,
-
-        max_count: comptime_int = 0,
-        min_bitalign: comptime_int = math.maxInt(usize), // suitably large to effectivly be infinite
-        max_bit_offset: comptime_int = 0,
-
-        done: bool = false,
-
-        next_id: [bit_size]comptime_int = [1]comptime_int{0} ** bit_size,
-        next_zst: comptime_int = 0,
-
-        const Self = @This();
-
-        fn add(comptime self: *Self, comptime bit_offset: comptime_int, is_zst: bool) void {
-            debug.assert(!self.done);
-            if (is_zst) {
-                self.zst_count += 1;
-                return;
-            }
-
-            var bitalign = leadingBits(0, bit_offset);
-            if (bitalign == null) {
-                bitalign = math.maxInt(usize); // suitably large to effectly infinite
-            }
-            if (bitalign.? < self.min_bitalign) self.min_bitalign = bitalign.?;
-
-            if (bit_offset > self.max_bit_offset) self.max_bit_offset = bit_offset;
-
-            self.fields[bit_offset] += 1;
-            if (self.fields[bit_offset] > self.max_count) self.max_count = self.fields[bit_offset];
-        }
-
-        fn tagDefn(comptime self: *Self) TagDefn {
-            debug.assert(self.done == true);
-
-            return TagDefn{
-                .min_bitalign = self.min_bitalign,
-                .max_bit_offset = self.max_bit_offset,
-                .max_disambig = self.max_count - 1,
-                .num_zst = self.zst_count,
-            };
-        }
-
-        fn tag(comptime self: *Self, bit_offset: comptime_int, is_zst: bool) comptime_int {
-            debug.assert(self.done);
-
-            var defn = self.tagDefn();
-
-            if (is_zst) {
-                var _tag = defn.maxSizedTag() + self.next_zst;
-                self.next_zst += 1;
-                return _tag;
-            } else {
-                var out: defn.TagType() = 0;
-                out |= bit_offset >> defn.min_bitalign;
-                var id = self.next_id[bit_offset];
-                if (id > 0) {
-                    out |= id << defn.offsetSize();
-                }
-                self.next_id[bit_offset] += 1;
-                return out;
-            }
-        }
-    };
-}
-
-const TagDefn = struct {
-    min_bitalign: comptime_int,
-    max_bit_offset: comptime_int,
-    max_disambig: comptime_int,
-    num_zst: comptime_int,
-
-    pub fn TagType(comptime self: *const @This()) type {
-        return math.IntFittingRange(0, self.maxSizedTag() + self.num_zst);
-    }
-
-    pub fn maxSizedTag(comptime self: *const TagDefn) comptime_int {
-        comptime var max_int = 0;
-        max_int = 1 << self.offsetSize();
-        // The + 1 ensures that a max_disambig of 0 will give a shift of zero,
-        // and 1 or more will give a shift of 1 or more.
-        max_int <<= math.log2_int_ceil(usize, @as(usize, self.max_disambig + 1));
-        max_int -= 1;
-        if (max_int <= 0) max_int = 1; // so that the root is different than the
-        // first zst field in a struct of all
-        // zsts
-        return max_int;
-    }
-
-    pub fn offsetSize(comptime self: *const TagDefn) comptime_int {
-        if (self.max_bit_offset == 0) return 0;
-        const size = math.log2_int_ceil(usize, @as(usize, self.max_bit_offset)) - self.min_bitalign;
-        return size;
-    }
-
-    pub fn isZst(comptime self: *const TagDefn, tag: self.TagType()) bool {
-        return tag > self.maxSizedTag();
-    }
-
-    pub fn bitOffset(comptime self: *const TagDefn, tag: self.TagType()) ?usize {
-        if (self.isZst(tag)) return null;
-        var dat = @as(usize, tag);
-        dat &= (1 << self.offsetSize()) - 1;
-        dat <<= self.min_bitalign;
-        return dat;
-    }
-};
 
 fn eqlStringSlices(lhs: []const []const u8, rhs: []const []const u8) bool {
     if (lhs.len != rhs.len) return false;
