@@ -13,6 +13,8 @@ const sort = std.sort.sort;
 
 const RecursiveField = @import("recursive_field.zig").RecursiveField;
 
+/// A dynamic (tagged union) value of a type that could be a recursive field of
+/// T.
 pub fn DynRecFieldValue(comptime T: type) type {
     comptime var fields = RecursiveField.of(T);
     sort(RecursiveField, fields, {}, RecursiveField.lessThan);
@@ -72,10 +74,13 @@ pub fn DynRecFieldValue(comptime T: type) type {
 
         const Self = @This();
 
+        /// All of the types represented.
         pub const types = __types;
 
+        /// A tag enum for each type. 
         pub const DynType = TagType;
 
+        /// Creates a value given a type and the value of that type.
         pub fn of(comptime Type: type, val: Type) Self {
             comptime var tag = dynType(Type) orelse @compileError("Type is not a tag of union");
             var value: UnionType = undefined;
@@ -83,13 +88,16 @@ pub fn DynRecFieldValue(comptime T: type) type {
             return .{ .tag = tag, .value = value };
         }
 
-        pub fn dynType(comptime Ty: type) ?TagType {
+        /// Returns the `DynType` that represents the type `T`, or null if `T`
+        /// is not represented.
+        pub fn dynType(comptime Ty: type) ?DynType {
             for (types) |ty, i| {
                 if (ty == Ty) return @intToEnum(TagType, tag_fields[i].value);
             }
             return null;
         }
 
+        /// Compares two `DynRecFieldValue`s for equality.
         pub fn eq(self: Self, other: Self) bool {
             if (self.tag != other.tag) return false;
 
@@ -104,12 +112,19 @@ pub fn DynRecFieldValue(comptime T: type) type {
             unreachable;
         }
 
+        /// Creates a `DynRecFieldValue` of the given zero-sized type.
+        ///
+        /// Passing a non-zero sized type to this function is safety-checked
+        /// illegal behavior.
         pub fn fromZst(dyn_type: TagType) Self {
-            // Since the type_table is not in this struct, this cannot be safety
-            // checked.
+            debug.assert(size_table[@enumToInt(dyn_type)] == 0);
             return .{ .tag = dyn_type, .value = undefined };
         }
 
+        /// Creates a `DynRecFieldValue` of the given type. Bitpacked data is
+        /// supported. `data` must point to the byte containing the start of the
+        /// value, and `bit_offset` must be the bit offset within that byte of
+        /// the start of the value.
         pub fn fromRaw(dyn_type: TagType, data: [*]const u8, bit_offset: u3) Self {
             var out: Self = .{ .tag = dyn_type, .value = undefined };
 
@@ -118,6 +133,9 @@ pub fn DynRecFieldValue(comptime T: type) type {
             return out;
         }
 
+        /// Writes the value held to a bit-aligned location. `data` must point
+        /// to the byte containing the start of the location to be written, and
+        /// `bit_offset` the bit offset within that byte.
         pub fn writeRaw(self: Self, out: [*]u8, bit_offset: u3) void {
             copyAndBitshiftUp(
                 mem.asBytes(&self.value)[0 .. byteSize(self.tag) + 1],
@@ -134,6 +152,8 @@ pub fn DynRecFieldValue(comptime T: type) type {
             break :tbl table;
         };
 
+        /// Returns the size of the given type, according to the rules of
+        /// `@sizeOf`.
         pub fn byteSize(dyn_type: DynType) usize {
             return size_table[@enumToInt(dyn_type)];
         }

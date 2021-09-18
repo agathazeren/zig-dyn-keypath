@@ -15,10 +15,8 @@ const ComptimeStringMap = std.ComptimeStringMap;
 const RecursiveField = @import("recursive_field.zig").RecursiveField;
 pub const DynRecFieldValue = @import("dyn_rec_field_value.zig").DynRecFieldValue;
 
-//pub fn Keypath(T: type) type {}
-
-//pub fn DynFieldType(T: type) type {}
-
+/// A runtime keypath that can address one of the fields or (recursive)
+/// subfields of a type at runtime. 
 pub fn RecursiveKeypath(comptime T: type) type {
     const keypath_data = buildKeypathData(T);
     const field_data = keypath_data.field_data;
@@ -64,10 +62,15 @@ pub fn RecursiveKeypath(comptime T: type) type {
 
         const Self = @This();
 
+        /// The keypath to the root of the struct, the struct itself.
         pub fn root() Self {
             return .{ ._inner = @field(Inner, "__keypath") }; // mangle(&[0][]const u8{}));
         }
 
+        /// Retrieves a keypath to a subfield, based on a runtime known name, or
+        /// null if there is no such keypath.
+        ///
+        /// `name` must contain the utf-8 encoded name of the field.
         pub fn key(self: Self, name: []const u8) ?Self {
             if (name_id_map.get(name)) |name_id| {
                 return subkey_table[self.toInt()][name_id];
@@ -76,6 +79,8 @@ pub fn RecursiveKeypath(comptime T: type) type {
             }
         }
 
+        /// Retreives the parent keypath of the keypath, or `null` if it is the
+        /// root keypath.
         pub fn up(self: Self) ?Self {
             if (self.eq(root())) {
                 return null;
@@ -84,6 +89,8 @@ pub fn RecursiveKeypath(comptime T: type) type {
             }
         }
 
+        /// Gets the value of the field this keypath represents in an object,
+        /// returning it as a `DynRecFieldValue`.
         pub fn get(self: Self, obj: *const T) DynRecFieldValue(T) {
             if (self.isZst()) {
                 return DynRecFieldValue(T).fromZst(self.dynType());
@@ -96,6 +103,9 @@ pub fn RecursiveKeypath(comptime T: type) type {
             }
         }
 
+        /// Sets the field represented by the keypath on an object of the
+        /// appropriate type. Passing a value of the wrong dynamic type is
+        /// safety-check illegal behavior.
         pub fn set(self: Self, obj: *T, value: DynRecFieldValue(T)) void {
             debug.assert(self.dynType() == value.tag);
             if (self.isZst()) return;
@@ -105,6 +115,9 @@ pub fn RecursiveKeypath(comptime T: type) type {
             );
         }
 
+        /// Converts the keypath to a keypath for annother type, by matching the
+        /// names of the fields, or `null` if the target type does not have a
+        /// field with the same path.
         pub fn duck(self: Self, comptime Duck: type) ?RecursiveKeypath(Duck) {
             var path: [max_depth + 1][]const u8 = undefined;
             var idx = max_depth;
@@ -122,6 +135,7 @@ pub fn RecursiveKeypath(comptime T: type) type {
             return RecursiveKeypath(Duck).fromPath(path[idx + 1 .. max_depth + 1]);
         }
 
+        /// Gets the keypath for the recursive path indicated by `path`.
         pub fn fromPath(path: []const []const u8) ?Self {
             var kp: ?Self = root();
             for (path) |comp| {
@@ -132,7 +146,7 @@ pub fn RecursiveKeypath(comptime T: type) type {
             return kp;
         }
 
-        pub fn fromPathComptime(comptime path: []const []const u8) ?Self {
+        fn fromPathComptime(comptime path: []const []const u8) ?Self {
             for (field_data) |field| {
                 if (eqlStringSlices(field.path, path)) {
                     return Self{ ._inner = @intToEnum(Inner, field.value) };
@@ -142,6 +156,8 @@ pub fn RecursiveKeypath(comptime T: type) type {
             return null;
         }
 
+        /// Returns the name of the field represented by the keypath
+        /// (non-recursivly), or `null` if it is the root.
         pub fn fieldName(self: Self) ?[]const u8 {
             if (self.eq(root())) {
                 return null;
@@ -150,6 +166,7 @@ pub fn RecursiveKeypath(comptime T: type) type {
             }
         }
 
+        /// Compares two keypaths for equality.
         pub fn eq(self: Self, other: Self) bool {
             return self._inner == other._inner;
         }
@@ -230,7 +247,8 @@ pub fn RecursiveKeypath(comptime T: type) type {
             break :tbl table;
         };
 
-        fn dynType(self: Self) DynType {
+        /// Returns at runtime the type of the field represented by the keypath.
+        pub fn dynType(self: Self) DynType {
             return type_table[@enumToInt(self._inner)];
         }
 
