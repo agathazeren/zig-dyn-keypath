@@ -3,4 +3,4 @@ zig-out
 .zigmod
 deps.zig
 zigmod.lock
-
+gyro.lock

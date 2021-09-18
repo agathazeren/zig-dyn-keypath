@@ -1,0 +1,17 @@
+pkgs:
+  dyn_keypath:
+    version: 0.0.0
+    description: Dynamic Recursive Keypaths
+    license: MIT
+    homepage_url: https://git.sr.ht/~powerofzero/zig-dyn-keypath
+    source_url: https://git.sr.ht/~powerofzero/zig-dyn-keypath
+    tags:
+      metaprogramming
+      keypath
+    files:
+      LICENSE
+      README.md
+      build.zig
+      src/*.zig
+
+      
