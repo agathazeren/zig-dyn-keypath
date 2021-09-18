@@ -1,6 +1,6 @@
 pkgs:
   dyn_keypath:
-    version: 0.0.0
+    version: 0.1.0
     description: Dynamic Recursive Keypaths
     license: MIT
     homepage_url: https://git.sr.ht/~powerofzero/zig-dyn-keypath
